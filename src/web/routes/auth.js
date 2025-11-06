@@ -1,19 +1,25 @@
 const router = require('express').Router();
-const axios = require('axios'); // MUDADO: fetch não é nativo do commonjs, axios é mais simples
+const axios = require('axios');
 const { clientId, clientSecret, redirectUri, scopes } = require('../../../config.js');
-const { dbWrapper } = require('../../database/database.js'); // MUDADO
+const { dbWrapper } = require('../../database/database.js');
 const { WebhookClient, EmbedBuilder } = require('discord.js');
 const botClient = require('../../bot/index.js');
 
 // Rota de callback
 router.get('/callback', async (req, res) => {
-  const { code, state } = req.query; // 'state' NÃO está sendo usado, mas poderia ser para gifts
+  const { code, state } = req.query; 
 
   if (!code) {
     return res.redirect('/invalid-code.html?error=cancelled');
   }
 
-  // A lógica de gift foi movida para /redeem, então este é apenas o auth padrão
+  // Tenta validar o 'state' para segurança
+  const authState = await dbWrapper.getAuthState(state);
+  if (!authState) {
+      console.warn("Auth state inválido ou expirado recebido.");
+      // Não vaza o erro, apenas redireciona
+      return res.redirect('/invalid-code.html?error=expired');
+  }
   
   try {
     // 1. Trocar o código por um Access Token
@@ -37,59 +43,72 @@ router.get('/callback', async (req, res) => {
     });
 
     const user = userResponse.data;
+    
+    // Verifica se o ID do usuário bate com o state (segurança)
+    if (user.id !== authState.userId) {
+        console.warn(`Disparidade de usuário no Auth State! Esperado ${authState.userId}, recebido ${user.id}.`);
+        return res.redirect('/invalid-code.html?error=mismatch');
+    }
 
     // 3. Salvar usuário no banco de dados
-    // CORREÇÃO: Adicionado async/await
     await dbWrapper.addUser(user.id, user.username, access_token, refresh_token);
 
     // 4. "Puxar" o membro para o servidor principal e adicionar o cargo
-    // CORREÇÃO: Adicionado async/await e .value
-    const mainGuildData = await dbWrapper.getMainGuild();
-    const mainGuildId = mainGuildData?.value;
+    // CORRIGIDO: Usa a nova função getBotConfig()
+    const config = await dbWrapper.getBotConfig();
+    const mainGuildId = config?.mainGuildId;
+    const roleId = config?.verifiedRoleId;
     
-    if (mainGuildId) {
-      // CORREÇÃO: Adicionado async/await
-      const config = await dbWrapper.getConfig(mainGuildId);
-      const roleId = config?.verified_role_id;
+    // Tenta adicionar ao servidor de onde o clique veio (se não for o principal)
+    const originalGuildId = authState.guildId;
+    
+    // Lista de servidores para tentar adicionar (primeiro o original, depois o principal)
+    // Remove duplicatas se forem o mesmo
+    const guildsToAdd = [...new Set([originalGuildId, mainGuildId].filter(Boolean))];
 
-      // Adiciona o cargo mesmo se o usuário já estiver no servidor
-      if (roleId) {
+    for (const guildId of guildsToAdd) {
         try {
-          const guild = await botClient.guilds.fetch(mainGuildId);
-          const member = await guild.members.fetch(user.id).catch(() => null); // Tenta buscar
+            const guild = await botClient.guilds.fetch(guildId);
+            const member = await guild.members.fetch(user.id).catch(() => null);
 
-          if (member) {
-            // Usuário já está no servidor, apenas adiciona o cargo
-            await member.roles.add(roleId);
-          } else {
-            // Usuário não está no servidor, usa o 'guilds.join'
-            await guild.members.add(user.id, {
-              accessToken: access_token,
-              roles: [roleId]
-            });
-          }
-          
-          // 5. Enviar Log
-          if (config.log_webhook_url) {
-            const webhook = new WebhookClient({ url: config.log_webhook_url });
-            const embed = new EmbedBuilder()
-              .setTitle('✅ Novo Membro Verificado!')
-              .setColor('#00FF00')
-              .setDescription(`${user.username} (\`${user.id}\`) foi verificado com sucesso.`)
-              .setThumbnail(`https://cdn.discordapp.com/avatars/${user.id}/${user.avatar}.png`)
-              .addFields({ name: 'Tipo', value: 'Verificação Padrão' })
-              .setTimestamp();
-            await webhook.send({ embeds: [embed] });
-          }
+            let rolesToAdd = [];
+            // Adiciona o cargo de verificado APENAS se estivermos no servidor principal
+            if (guildId === mainGuildId && roleId) {
+                rolesToAdd.push(roleId);
+            }
+
+            if (member) {
+                // Usuário já está no servidor, apenas adiciona o cargo (se houver)
+                if (rolesToAdd.length > 0) {
+                    await member.roles.add(rolesToAdd);
+                }
+            } else {
+                // Usuário não está no servidor, usa o 'guilds.join'
+                await guild.members.add(user.id, {
+                    accessToken: access_token,
+                    roles: rolesToAdd
+                });
+            }
+
+            // 5. Enviar Log (Apenas para o servidor principal)
+            if (guildId === mainGuildId && config.logsWebhookUrl) {
+                const webhook = new WebhookClient({ url: config.logsWebhookUrl });
+                const embed = new EmbedBuilder()
+                    .setTitle('✅ Novo Membro Verificado!')
+                    .setColor('#00FF00')
+                    .setDescription(`${user.username} (\`${user.id}\`) foi verificado com sucesso.`)
+                    .setThumbnail(`https://cdn.discordapp.com/avatars/${user.id}/${user.avatar}.png`)
+                    .addFields({ name: 'Servidor de Origem', value: `${originalGuildId}` })
+                    .setTimestamp();
+                await webhook.send({ embeds: [embed] });
+            }
 
         } catch (error) {
-          console.error(`Erro ao adicionar membro ${user.username} ou cargo:`, error.message);
+            console.error(`Erro ao adicionar membro ${user.username} ao servidor ${guildId}:`, error.message);
         }
-      }
     }
 
     // 6. Redirecionar para a página de sucesso
-    // (Ponto 2 da sua última solicitação)
     res.redirect('/auth-success.html');
 
   } catch (error) {
