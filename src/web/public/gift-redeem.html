@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale-1.0">
+    <title>Resgatar Membros</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/style.css">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        'discord-bg': '#313338',
+                        'discord-card': '#2B2D31',
+                        'discord-purple': '#5865F2',
+                        'discord-text-primary': '#F2F3F5',
+                        'discord-text-secondary': '#B5BAC1',
+                        'discord-green': '#2DC770',
+                        'discord-red': '#F23F42',
+                    }
+                }
+            }
+        }
+    </script>
+</head>
+<body class="bg-discord-bg text-discord-text-primary flex items-center justify-center min-h-screen font-sans">
+
+    <!-- Card Principal (Foto 3) -->
+    <div id="redeem-card" class="bg-discord-card p-8 rounded-lg shadow-lg w-full max-w-md text-center">
+        <img src="https://placehold.co/80x80/5865F2/FFFFFF?text=BOT" alt="Discord Icon" class="mx-auto mb-4 rounded-full"> <!-- Ícone do Discord -->
+        <h1 class="text-2xl font-bold mb-2">Resgatar Membro(s)</h1>
+        <p class="text-discord-text-secondary mb-6">Digite o ID do servidor para puxar os membros.</p>
+        
+        <div class="space-y-4">
+            <input type="text" id="guild-id-input" placeholder="Digite o ID do servidor" class="bg-discord-bg text-discord-text-primary w-full px-4 py-3 rounded-md border border-transparent focus:outline-none focus:ring-2 focus:ring-discord-purple">
+            <button id="confirm-button" class="w-full bg-discord-purple hover:bg-opacity-80 text-white font-bold py-3 px-4 rounded-md transition duration-200">
+                Confirmar
+            </button>
+        </div>
+        <p id="error-message" class="text-discord-red mt-4 h-4"></p>
+    </div>
+
+    <!-- Card de Sucesso (Foto 5) -->
+    <div id="success-card" class="bg-discord-green p-8 rounded-lg shadow-lg w-full max-w-md text-center hidden">
+        <h1 class="text-2xl font-bold mb-2 text-white">Pedido Realizado com Sucesso!</h1>
+        <p id="success-details" class="text-gray-100">Seu pedido foi adicionado à fila e será processado em breve.</p>
+    </div>
+
+<script>
+    document.addEventListener('DOMContentLoaded', () => {
+        const confirmButton = document.getElementById('confirm-button');
+        const guildIdInput = document.getElementById('guild-id-input');
+        const errorMessage = document.getElementById('error-message');
+        
+        const redeemCard = document.getElementById('redeem-card');
+        const successCard = document.getElementById('success-card');
+        const successDetails = document.getElementById('success-details');
+
+        const code = window.location.pathname.split('/redeem/')[1];
+
+        if (!code) {
+            redeemCard.innerHTML = '<h1 class="text-2xl font-bold text-discord-red">Código Inválido</h1><p>O link que você usou parece estar quebrado.</p>';
+        }
+
+        confirmButton.addEventListener('click', async () => {
+            const guildId = guildIdInput.value.trim();
+            if (!guildId) {
+                errorMessage.textContent = 'Por favor, insira um ID de servidor.';
+                return;
+            }
+
+            confirmButton.disabled = true;
+            confirmButton.textContent = 'Processando...';
+            errorMessage.textContent = '';
+
+            try {
+                const response = await fetch('/redeem/pull', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ code, guildId })
+                });
+
+                const data = await response.json();
+
+                if (response.ok) {
+                    // Sucesso (Foto 5)
+                    redeemCard.classList.add('hidden');
+                    successDetails.textContent = data.details || 'Seu pedido foi adicionado à fila e será processado em breve.';
+                    successCard.classList.remove('hidden');
+                } else {
+                    // Erro
+                    errorMessage.textContent = data.error || 'Ocorreu um erro desconhecido.';
+                    confirmButton.disabled = false;
+                    confirmButton.textContent = 'Confirmar';
+                }
+
+            } catch (error) {
+                errorMessage.textContent = 'Erro de conexão com o servidor.';
+                confirmButton.disabled = false;
+                confirmButton.textContent = 'Confirmar';
+            }
+        });
+    });
+</script>
+</body>
+</html>
