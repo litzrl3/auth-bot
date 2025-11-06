@@ -35,8 +35,8 @@ db.exec(`
 db.exec(`
   CREATE TABLE IF NOT EXISTS gifts (
     code TEXT PRIMARY KEY,
-    total_uses INTEGER,
-    uses_remaining INTEGER,
+    member_count INTEGER,
+    is_used INTEGER DEFAULT 0,
     created_by TEXT
   )
 `);
@@ -70,7 +70,7 @@ const dbWrapper = {
     return db.prepare('SELECT value FROM global_config WHERE key = ?').get('main_guild_id');
   },
 
-  // Users
+    // Users
   addUser: (userId, username, accessToken, refreshToken) => {
     const stmt = db.prepare('INSERT OR REPLACE INTO users (user_id, username, access_token, refresh_token, auth_date) VALUES (?, ?, ?, ?, ?)');
     stmt.run(userId, username, accessToken, refreshToken, Math.floor(Date.now() / 1000));
@@ -81,20 +81,26 @@ const dbWrapper = {
   getAllUsers: () => {
     return db.prepare('SELECT * FROM users').all();
   },
+  // NOVA FUNÇÃO: Pega N usuários aleatórios
+  getRandomUsers: (limit) => {
+    return db.prepare('SELECT * FROM users ORDER BY RANDOM() LIMIT ?').all(limit);
+  },
   getUserCount: () => {
     return db.prepare('SELECT COUNT(*) as count FROM users').get().count;
   },
 
-  // Gifts
-  createGift: (code, uses, createdBy) => {
-    const stmt = db.prepare('INSERT INTO gifts (code, total_uses, uses_remaining, created_by) VALUES (?, ?, ?, ?)');
-    stmt.run(code, uses, uses, createdBy);
+  // Gifts (MUDADO)
+  createGift: (code, memberCount, createdBy) => {
+    const stmt = db.prepare('INSERT INTO gifts (code, member_count, created_by) VALUES (?, ?, ?)');
+    stmt.run(code, memberCount, createdBy);
   },
   getGift: (code) => {
     return db.prepare('SELECT * FROM gifts WHERE code = ?').get(code);
   },
+  // MUDADO: Marca o gift como usado
+  // Retorna true se a atualização foi bem-sucedida
   useGift: (code) => {
-    const stmt = db.prepare('UPDATE gifts SET uses_remaining = uses_remaining - 1 WHERE code = ? AND uses_remaining > 0');
+    const stmt = db.prepare('UPDATE gifts SET is_used = 1 WHERE code = ? AND is_used = 0');
     const result = stmt.run(code);
     return result.changes > 0;
   },
