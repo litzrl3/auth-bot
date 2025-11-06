@@ -4,6 +4,11 @@ const { port } = require('../../config.js');
 
 const app = express();
 
+// --- ADICIONADO ---
+// Permite que o servidor entenda JSON vindo do body de um POST/PUT
+app.use(express.json());
+// ------------------
+
 // Servir arquivos estáticos da pasta 'public'
 app.use(express.static(path.join(__dirname, 'public')));
 
