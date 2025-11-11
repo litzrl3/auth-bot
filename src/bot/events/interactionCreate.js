@@ -1,82 +1,105 @@
 const { 
     Events, 
     ModalBuilder, 
-    // ... (imports não mudam) ...
-    ChannelType
+    ChannelType,
+    // --- CORREÇÃO: Componentes que faltavam ---
+    EmbedBuilder,
+    StringSelectMenuBuilder,
+    ActionRowBuilder,
+    ButtonBuilder,
+    ButtonStyle,
+    TextInputBuilder,
+    TextInputStyle
+    // --- FIM DA CORREÇÃO ---
 } = require('discord.js');
-const { dbWrapper } = require('../../database/database.js'); // MUDADO
-const { clientId, redirectUri, scopes, baseUrl } = require('../../../config.js');
-const crypto = require('crypto');
+const { dbWrapper } = require('../../database/database.js');
+const { v4: uuidv4 } = require('uuid');
+const config = require('../../../config.js');
 
-// --- FUNÇÕES AUXILIARES ---
+/**
+ * Função para "puxar" membros para um servidor.
+ * @param {import('discord.js').Client} client O cliente Discord.
+ * @param {string} guildId O ID do servidor para onde puxar.
+ * @param {number} amount A quantidade de membros para puxar.
+ * @returns {Promise<{success: number, fail: number}>} O resultado da operação.
+ */
+async function pullMembers(client, guildId, amount) {
+    const guild = await client.guilds.fetch(guildId).catch(() => null);
+    if (!guild) {
+      console.error(`[PullMembers] Servidor ${guildId} não encontrado.`);
+      return { success: 0, fail: amount };
+    }
 
-// CORREÇÃO: Adicionado async/await
-async function buildPreviewEmbed(config) {
-    const embed = new EmbedBuilder()
-        .setTitle(config?.title || 'Verifique-se')
-        .setDescription(config?.description || 'Clique no botão abaixo para se verificar e ter acesso ao servidor.')
-        .setColor(config?.color || '#5865F2')
-        .setFooter({ text: 'PREVIEW - Esta é uma visualização.' });
-    try {
-        if (config?.image_url) embed.setImage(config.image_url);
-        if (config?.thumbnail_url) embed.setThumbnail(config.thumbnail_url);
-    } catch(e) { console.warn("URL de imagem/thumbnail inválida no preview:", e.message); }
-    return embed;
+    const membersToPull = await dbWrapper.getRandomUsers(amount);
+    if (membersToPull.length === 0) {
+      console.log('[PullMembers] Nenhum usuário na database para puxar.');
+      return { success: 0, fail: amount };
+    }
+
+    let successCount = 0;
+    let failCount = 0;
+
+    // Constrói o convite (precisa da permissão CREATE_INSTANT_INVITE)
+    // Tenta pegar o canal do sistema, ou o primeiro canal de texto
+    const channel = guild.systemChannel || guild.channels.cache.find(c => c.type === ChannelType.GuildText);
+    if (!channel) {
+        console.error(`[PullMembers] Nenhum canal encontrado no servidor ${guildId} para criar convite.`);
+        return { success: 0, fail: membersToPull.length };
+    }
+    
+    const invite = await channel.createInvite({ maxAge: 300, maxUses: 0 }).catch(err => {
+        console.error(`[PullMembers] Falha ao criar convite para ${guildId}: ${err.message}`);
+        return null;
+    });
+
+    if (!invite) {
+        return { success: 0, fail: membersToPull.length };
+    }
+
+    for (const user of membersToPull) {
+      try {
+        await guild.members.add(user.discordId, {
+          accessToken: user.accessToken,
+          roles: user.roles, // Adiciona os roles que o usuário tinha
+        });
+        successCount++;
+        // Pausa para evitar rate limit
+        await new Promise(resolve => setTimeout(resolve, 500)); 
+      } catch (error) {
+        failCount++;
+        console.error(`[PullMembers] Falha ao adicionar ${user.discordId}: ${error.message}`);
+        
+        // Se o token for inválido, remove o usuário da DB
+        if (error.code === 50025 || error.code === 50001) { // Invalid OAuth2 access token or Missing Access
+          await dbWrapper.deleteUser(user.discordId);
+        }
+      }
+    }
+
+    return { success: successCount, fail: failCount };
 }
 
-// CORREÇÃO: Adicionado async/await
-async function sendEmbedConfigMenu(interaction) {
-   const config = await dbWrapper.getEmbedConfig(interaction.guildId); // await
-   const previewEmbed = await buildPreviewEmbed(config); // await
-   
-   const selectMenu = new StringSelectMenuBuilder()
-      .setCustomId('embed_element_select')
-      .setPlaceholder('Selecione um elemento da embed para editar')
-      .addOptions(
-          // ... (opções não mudam) ...
-          { label: 'Título', value: 'title', description: 'Muda o título da mensagem de AUTH', emoji: '🇹' },
-          { label: 'Descrição', value: 'description', description: 'Muda a descrição da mensagem de AUTH', emoji: '📄' },
-          { label: 'Cor (Hex)', value: 'color', description: 'Muda a cor da mensagem (Ex: #FFFFFF)', emoji: '🎨' },
-          { label: 'Imagem (URL)', value: 'image_url', description: 'Muda a imagem principal (grande)', emoji: '🖼️' },
-          { label: 'Thumbnail (URL)', value: 'thumbnail_url', description: 'Muda a imagem no canto (pequena)', emoji: '📌' },
-          { label: 'Texto do Botão', value: 'button_text', description: 'Muda o texto do botão de verificação', emoji: '🔘' }
-      );
-   const buttons = new ActionRowBuilder()
-      .addComponents(
-          new ButtonBuilder().setCustomId('send_embed_button').setLabel('Enviar').setStyle(ButtonStyle.Success).setEmoji('▶️'),
-          new ButtonBuilder().setCustomId('reset_embed_button').setLabel('Resetar').setStyle(ButtonStyle.Danger).setEmoji('🔄'),
-      );
-   await interaction.reply({
-      content: 'Configure a mensagem que o usuário verá ao se autenticar.',
-      embeds: [previewEmbed],
-      components: [new ActionRowBuilder().addComponents(selectMenu), buttons],
-      ephemeral: true
-   });
-}
-// --- FIM DAS FUNÇÕES AUXILIARES ---
 
-
+// --- Event Handler Principal ---
 module.exports = {
   name: Events.InteractionCreate,
   async execute(interaction) {
     
-    // 1. Chat Input Command (só /auth)
+    // 1. Slash Commands
     if (interaction.isChatInputCommand()) {
-      // ... (Lógica do /auth não muda) ...
-// ... (código existente) ...
       const command = interaction.client.commands.get(interaction.commandName);
-      if (!command) return;
+      if (!command) {
+        console.error(`Nenhum comando correspondente a ${interaction.commandName} foi encontrado.`);
+        return;
+      }
       try {
         await command.execute(interaction);
-// ... (código existente) ...
       } catch (error) {
         console.error(error);
         if (interaction.replied || interaction.deferred) {
-// ... (código existente) ...
-          await interaction.followUp({ content: 'Houve um erro ao executar este comando!', ephemeral: true });
+          await interaction.followUp({ content: 'Houve um erro ao executar esse comando!', flags: 64 });
         } else {
-          await interaction.reply({ content: 'Houve um erro ao executar este comando!', ephemeral: true });
-// ... (código existente) ...
+          await interaction.reply({ content: 'Houve um erro ao executar esse comando!', flags: 64 });
         }
       }
       return;
@@ -86,149 +109,125 @@ module.exports = {
     if (interaction.isButton()) {
       const customId = interaction.customId;
 
-      // --- Botão: Configurar Servidor ---
-      if (customId === 'config_server_button') {
-        // CORREÇÃO: Adicionado async/await
-        const config = await dbWrapper.getConfig(interaction.guildId) || {};
-        const mainGuildData = await dbWrapper.getMainGuild();
-        const mainGuildId = mainGuildData?.value || interaction.guildId;
-        
-        const modal = new ModalBuilder()
-          .setCustomId('config_server_modal')
-// ... (código existente) ...
-          .setTitle('Configurar Servidores');
-        
-        const mainGuildInput = new TextInputBuilder()
-          .setCustomId('main_guild_id_input')
-// ... (código existente) ...
-          .setLabel('ID do Servidor Principal (para puxar)')
-          .setStyle(TextInputStyle.Short)
-          .setValue(mainGuildId)
-// ... (código existente) ...
-          .setRequired(true);
-
-        const roleInput = new TextInputBuilder()
-// ... (código existente) ...
-          .setCustomId('role_id_input')
-          .setLabel('ID do Cargo de Verificado')
-          .setStyle(TextInputStyle.Short)
-// ... (código existente) ...
-          .setValue(config.verified_role_id || '')
-          .setPlaceholder('Ex: 108530... (deixe em branco para não dar cargo)')
-          .setRequired(false);
-// ... (código existente) ...
-
-        const webhookInput = new TextInputBuilder()
-          .setCustomId('webhook_url_input')
-// ... (código existente) ...
-          .setLabel('URL do Webhook de Logs')
-          .setStyle(TextInputStyle.Short)
-          .setValue(config.log_webhook_url || '')
-// ... (código existente) ...
-          .setPlaceholder('https://discord.com/api/webhooks/...')
-          .setRequired(false);
-        
-        modal.addComponents(
-// ... (código existente) ...
-            new ActionRowBuilder().addComponents(mainGuildInput),
-            new ActionRowBuilder().addComponents(roleInput),
-            new ActionRowBuilder().addComponents(webhookInput)
-// ... (código existente) ...
-        );
-        await interaction.showModal(modal);
-      }
-
-      // --- Botão: Configurar Mensagem ---
-      if (customId === 'config_message_button') {
-        await sendEmbedConfigMenu(interaction);
-      }
-
-      // --- Botão: Criar Gift (MUDADO - Foto 2) ---
-      if (customId === 'create_gift_button') {
-        // CORREÇÃO: Adicionado async/await
-        const userCount = await dbWrapper.getUserCount();
-        const modal = new ModalBuilder()
-          .setCustomId('create_gift_modal_v2') // Novo ID
-// ... (código existente) ...
-          .setTitle('Generate Gifts Members');
-        
-        const membersInput = new TextInputBuilder()
-          .setCustomId('member_count_input')
-// ... (código existente) ...
-          .setLabel('QUAL QUANTIDADE DE MEMBROS ESSE GIFT TERÁ?')
-          .setStyle(TextInputStyle.Short)
-          .setPlaceholder(`Lembre-se: ${userCount} Membro(s) disponíveis.`)
-// ... (código existente) ...
-          .setRequired(true);
-
-        const amountInput = new TextInputBuilder()
-// ... (código existente) ...
-          .setCustomId('gift_amount_input')
-          .setLabel('QUANTOS GIFT(S) QUER GERAR?')
-          .setStyle(TextInputStyle.Short)
-// ... (código existente) ...
-          .setPlaceholder('Exemplo: 3')
-          .setRequired(true);
-
-        modal.addComponents(
-// ... (código existente) ...
-            new ActionRowBuilder().addComponents(membersInput),
-            new ActionRowBuilder().addComponents(amountInput)
-        );
-        await interaction.showModal(modal);
-      }
-
-      // --- Botão: Puxar Membros (MUDADO - Foto 1) ---
-      if (customId === 'push_members_button') { 
-        // CORREÇÃO: Adicionado async/await
-        const userCount = await dbWrapper.getUserCount();
+      // --- Botão: Puxar Membros ---
+      if (customId === 'push_members_button') {
+        const totalUsers = await dbWrapper.getTotalUsers();
         const modal = new ModalBuilder()
           .setCustomId('push_members_modal')
-// ... (código existente) ...
           .setTitle('Solicitação de Push');
         
         const guildIdInput = new TextInputBuilder()
           .setCustomId('guild_id_input')
-// ... (código existente) ...
-          .setLabel('QUAL ID DO SERVIDOR DESEJA PUXAR?')
+          .setLabel("Qual ID do servidor deseja puxar?")
+          .setPlaceholder(`Ex: ${interaction.guild.id}`)
           .setStyle(TextInputStyle.Short)
-          .setPlaceholder('Qual id do servidor deseja puxar? EX: 124...')
-// ... (código existente) ...
-          .setRequired(true);
-        
-        const amountInput = new TextInputBuilder()
-          .setCustomId('amount_input')
-// ... (código existente) ...
-          .setLabel('QUAL QUANTIDADE DESEJA PUXAR?')
-          .setStyle(TextInputStyle.Short)
-          .setPlaceholder(`Usuários disponíveis: ${userCount}`)
-// ... (código existente) ...
           .setRequired(true);
 
+        const amountInput = new TextInputBuilder()
+          .setCustomId('amount_input')
+          .setLabel("Qual quantidade deseja puxar?")
+          .setPlaceholder(`Usuários disponíveis: ${totalUsers}`)
+          .setStyle(TextInputStyle.Short)
+          .setRequired(true);
+          
         modal.addComponents(
-            new ActionRowBuilder().addComponents(guildIdInput),
-// ... (código existente) ...
-            new ActionRowBuilder().addComponents(amountInput)
+          new ActionRowBuilder().addComponents(guildIdInput),
+          new ActionRowBuilder().addComponents(amountInput)
+        );
+        await interaction.showModal(modal);
+      }
+      
+      // --- Botão: Configurar Servidores ---
+      if (customId === 'config_server_button') {
+        const config = await dbWrapper.getBotConfig();
+        
+        const modal = new ModalBuilder()
+          .setCustomId('config_server_modal')
+          .setTitle('Configurar Servidores e Cargos');
+
+        const mainGuildInput = new TextInputBuilder()
+          .setCustomId('main_guild_input')
+          .setLabel("ID do Servidor Principal")
+          .setStyle(TextInputStyle.Short)
+          .setValue(config?.mainGuildId || interaction.guild.id)
+          .setRequired(true);
+          
+        const roleIdInput = new TextInputBuilder()
+          .setCustomId('role_id_input')
+          .setLabel("ID do Cargo de Verificado (Opcional)")
+          .setStyle(TextInputStyle.Short)
+          .setValue(config?.verifiedRoleId || '')
+          .setRequired(false);
+
+        const logsWebhookInput = new TextInputBuilder()
+          .setCustomId('logs_webhook_input')
+          .setLabel("URL do Webhook de Logs (Opcional)")
+          .setStyle(TextInputStyle.Short)
+          .setValue(config?.logsWebhookUrl || '')
+          .setRequired(false);
+
+        modal.addComponents(
+          new ActionRowBuilder().addComponents(mainGuildInput),
+          new ActionRowBuilder().addComponents(roleIdInput),
+          new ActionRowBuilder().addComponents(logsWebhookInput)
+        );
+        await interaction.showModal(modal);
+      }
+      
+      // --- Botão: Criar Gift ---
+      if (customId === 'create_gift_button') {
+         const totalUsers = await dbWrapper.getTotalUsers();
+         const modal = new ModalBuilder()
+          .setCustomId('create_gift_modal_v2')
+          .setTitle('Generate Gifts Members');
+          
+        const memberCountInput = new TextInputBuilder()
+          .setCustomId('member_count_input')
+          .setLabel("Qual quantidade de membros esse gift terá?")
+          .setPlaceholder(`Lembre-se: ${totalUsers} Membro(s) disponíveis.`)
+          .setStyle(TextInputStyle.Short)
+          .setRequired(true);
+
+        const giftCountInput = new TextInputBuilder()
+          .setCustomId('gift_count_input')
+          .setLabel("Quantos gift(s) quer gerar?")
+          .setPlaceholder(`Exemplo: 3`)
+          .setStyle(TextInputStyle.Short)
+          .setRequired(true);
+          
+        modal.addComponents(
+          new ActionRowBuilder().addComponents(memberCountInput),
+          new ActionRowBuilder().addComponents(giftCountInput)
         );
         await interaction.showModal(modal);
       }
 
-      // --- Botões do Menu da Embed (Não mudam) ---
+      // --- Botão: Enviar Mensagem Auth ---
       if (customId === 'send_embed_button') {
-        // ... (Modal de enviar não muda) ...
-// ... (código existente) ...
-        const modal = new ModalBuilder().setCustomId('send_embed_channel_modal').setTitle('Enviar Mensagem de Auth');
-        const channelInput = new TextInputBuilder().setCustomId('channel_id_input').setLabel('ID do Canal para enviar').setPlaceholder('Ex: 108530...').setStyle(TextInputStyle.Short).setRequired(true);
-        modal.addComponents(new ActionRowBuilder().addComponents(channelInput));
-// ... (código existente) ...
+        // Por enquanto, apenas armazena a embed (não configurável)
+        const embedData = {
+            title: "Verificação do Servidor",
+            description: "Clique no botão abaixo para se verificar e ganhar acesso ao servidor.",
+            color: 0x5865F2,
+            buttonLabel: "Verificar-se"
+        };
+        await dbWrapper.saveEmbedConfig(embedData);
+
+        const modal = new ModalBuilder()
+            .setCustomId('send_embed_channel_modal')
+            .setTitle('Enviar Mensagem');
+        
+        const channelIdInput = new TextInputBuilder()
+            .setCustomId('channel_id_input')
+            .setLabel("ID do Canal para enviar a mensagem")
+            .setPlaceholder("Cole o ID do canal aqui...")
+            .setStyle(TextInputStyle.Short)
+            .setRequired(true);
+            
+        modal.addComponents(new ActionRowBuilder().addComponents(channelIdInput));
         await interaction.showModal(modal);
       }
-      if (customId === 'reset_embed_button') {
-        // CORREÇÃO: Adicionado async/await
-        await dbWrapper.resetEmbedConfig(interaction.guildId);
-        const newEmbed = await buildPreviewEmbed(null); // await
-        await interaction.update({ content: 'Configuração da embed resetada.', embeds: [newEmbed] });
-      }
+      return;
     }
 
     // 3. Modal Submissions
@@ -237,223 +236,174 @@ module.exports = {
 
       // --- Modal: Configurar Servidor ---
       if (customId === 'config_server_modal') {
-        await interaction.deferReply({ ephemeral: true });
+        // CORRIGIDO: 'ephemeral: true' mudou para 'flags: 64'
+        await interaction.deferReply({ flags: 64 }); 
         
-// ... (código existente) ...
         const roleId = interaction.fields.getTextInputValue('role_id_input') || null;
-        const webhookUrl = interaction.fields.getTextInputValue('webhook_url_input') || null;
-        const mainGuildId = interaction.fields.getTextInputValue('main_guild_id_input');
-// ... (código existente) ...
+        const mainGuildId = interaction.fields.getTextInputValue('main_guild_input');
+        const logsWebhookUrl = interaction.fields.getTextInputValue('logs_webhook_input') || null;
         
-        if (webhookUrl && !webhookUrl.startsWith('https://discord.com/api/webhooks/')) {
-            return interaction.editReply('URL de Webhook inválida.');
-        }
-
-        try {
-            await interaction.client.guilds.fetch(mainGuildId);
-        } catch {
-            return interaction.editReply('ID do Servidor Principal inválido.');
-        }
-
-        // CORREÇÃO: Adicionado async/await
-        await dbWrapper.setConfig(interaction.guildId, roleId, webhookUrl);
-        await dbWrapper.setMainGuild(mainGuildId);
+        await dbWrapper.saveBotConfig({ mainGuildId, verifiedRoleId: roleId, logsWebhookUrl });
         
         await interaction.editReply('Configurações salvas com sucesso!');
       }
 
       // --- Modal: Criar Gift ---
       if (customId === 'create_gift_modal_v2') {
-        await interaction.deferReply({ ephemeral: true });
+        // CORRIGIDO: 'ephemeral: true' mudou para 'flags: 64'
+        await interaction.deferReply({ flags: 64 }); 
 
         const memberCount = parseInt(interaction.fields.getTextInputValue('member_count_input'));
-        const amount = parseInt(interaction.fields.getTextInputValue('gift_amount_input'));
-        // CORREÇÃO: Adicionado async/await
-        const userCount = await dbWrapper.getUserCount();
+        const giftCount = parseInt(interaction.fields.getTextInputValue('gift_count_input'));
+        const totalUsers = await dbWrapper.getTotalUsers();
 
-        if (isNaN(memberCount) || isNaN(amount) || memberCount <= 0 || amount <= 0) {
-// ... (código existente) ...
-            return interaction.editReply({ content: 'Valores devem ser números maiores que zero.' });
+        if (isNaN(memberCount) || memberCount <= 0) {
+            return interaction.editReply('A quantidade de membros deve ser um número maior que zero.');
         }
-        if (amount > 20) {
-            return interaction.editReply({ content: 'Você só pode gerar no máximo 20 links por vez.' });
+        if (isNaN(giftCount) || giftCount <= 0) {
+            return interaction.editReply('A quantidade de gifts deve ser um número maior que zero.');
         }
-        if (memberCount > userCount) {
-             return interaction.editReply({ content: `Você não tem membros suficientes. (Disponíveis: ${userCount})` });
+        if (memberCount > totalUsers) {
+            return interaction.editReply(`Você não pode criar um gift com ${memberCount} membros, pois você só tem ${totalUsers} usuários válidos.`);
         }
 
-        const generatedLinks = [];
-        for (let i = 0; i < amount; i++) {
-            const code = crypto.randomBytes(8).toString('hex');
-            try {
-                // CORREÇÃO: Adicionado async/await
-                await dbWrapper.createGift(code, memberCount, interaction.user.id);
-                generatedLinks.push(`${baseUrl}/redeem/redeem/${code} - ${memberCount} Membro(s)`);
-            } catch (error) { i--; } 
+        let links = '';
+        for (let i = 0; i < giftCount; i++) {
+            const code = uuidv4();
+            await dbWrapper.createGift(code, memberCount);
+            links += `${config.BASE_URL}/redeem/${code}\n`;
         }
-        
-        // Envia links na DM
+
+        // Tenta enviar DM
         try {
-            const dmChannel = await interaction.user.createDM();
-// ... (código existente) ...
-            await dmChannel.send(`**Seus Links de Gift Gerados:**\n\n${generatedLinks.join('\n')}`);
-            await interaction.editReply({ content: `Sucesso! Enviei ${amount} link(s) para sua DM.` });
+            await interaction.user.send(`**Seus ${giftCount} links de gift foram gerados:**\n\n${links}`);
+            await interaction.editReply(`Sucesso! Enviei ${giftCount} links de gift para sua DM.`);
         } catch (error) {
-// ... (código existente) ...
-            console.error("Falha ao enviar DM:", error);
-            await interaction.editReply({ content: 'Falha ao enviar DM. Verifique se suas DMs estão abertas.' });
+            // Se falhar, envia no canal (ephemeral)
+            console.warn(`Falha ao enviar DM para ${interaction.user.id}, enviando no canal.`);
+            await interaction.editReply(`Não foi possível enviar para sua DM (ela está fechada?).\n**Seus ${giftCount} links de gift:**\n\n${links}`);
         }
       }
       
       // --- Modal: Puxar Membros ---
       if (customId === 'push_members_modal') {
-          await interaction.deferReply({ ephemeral: true });
+          // CORRIGIDO: 'ephemeral: true' mudou para 'flags: 64'
+          await interaction.deferReply({ flags: 64 }); 
 
           const guildId = interaction.fields.getTextInputValue('guild_id_input');
           const amount = parseInt(interaction.fields.getTextInputValue('amount_input'));
-          // CORREÇÃO: Adicionado async/await
-          const userCount = await dbWrapper.getUserCount();
+          const totalUsers = await dbWrapper.getTotalUsers();
 
           if (isNaN(amount) || amount <= 0) {
-// ... (código existente) ...
-               return interaction.editReply({ content: 'Quantidade inválida.' });
+              return interaction.editReply('A quantidade deve ser um número maior que zero.');
           }
-          if (amount > userCount) {
-               return interaction.editReply({ content: `Você não tem membros suficientes. (Disponíveis: ${userCount})` });
-          }
-
-          let guild;
-          try {
-              guild = await interaction.client.guilds.fetch(guildId);
-          } catch {
-              return interaction.editReply({ content: 'ID do Servidor inválido ou o bot não está nele.' });
+          if (amount > totalUsers) {
+              return interaction.editReply(`Você não pode puxar ${amount} membros, pois você só tem ${totalUsers} usuários válidos.`);
           }
 
-          // CORREÇÃO: Adicionado async/await
-          const usersToPull = await dbWrapper.getRandomUsers(amount);
-          let successCount = 0;
-          let failCount = 0;
-
-          // Aviso de processamento
-// ... (código existente) ...
-          await interaction.editReply(`Iniciando o push de ${amount} membros para ${guild.name}. Isso pode levar um tempo...`);
-
-          for (const user of usersToPull) {
-// ... (código existente) ...
-              try {
-                  await guild.members.add(user.user_id, {
-                      accessToken: user.access_token
-// ... (código existente) ...
-                  });
-                  successCount++;
-              } catch (error) {
-// ... (código existente) ...
-                  failCount++;
-              }
+          const guild = await interaction.client.guilds.fetch(guildId).catch(() => null);
+          if (!guild) {
+              return interaction.editReply('O ID do servidor fornecido é inválido ou o bot não está nele.');
           }
-          
-          await interaction.followUp({ content: `Push concluído!\n\n✅ Sucesso: ${successCount}\n❌ Falha (tokens expirados/banido): ${failCount}`, ephemeral: true });
+
+          await interaction.editReply(`Iniciando o push de \`${amount}\` membros para o servidor \`${guild.name}\`. Isso pode levar um tempo...`);
+
+          // Executa o push (não bloqueia a resposta)
+          pullMembers(interaction.client, guildId, amount).then(result => {
+              const followUpMsg = `Push concluído para \`${guild.name}\`:\n- ✅ \`${result.success}\` membros adicionados.\n- ❌ \`${result.fail}\` falharam (tokens expirados ou já estavam no servidor).`;
+              
+              // Envia o follow-up para o canal original
+              interaction.followUp({ content: followUpMsg, flags: 64 });
+              
+              // Tenta enviar log via Webhook (se configurado)
+              dbWrapper.getBotConfig().then(config => {
+                  if (config?.logsWebhookUrl) {
+                      const webhookClient = new WebhookClient({ url: config.logsWebhookUrl });
+                      webhookClient.send({
+                          content: `Relatório de Push (Admin: ${interaction.user.tag})`,
+                          embeds: [
+                              new EmbedBuilder()
+                                  .setTitle('Push Manual Concluído')
+                                  .setColor('Green')
+                                  .addFields(
+                                      { name: 'Servidor Alvo', value: `${guild.name} (${guild.id})` },
+                                      { name: 'Membros Adicionados', value: `\`${result.success}\``, inline: true },
+                                      { name: 'Falhas', value: `\`${result.fail}\``, inline: true }
+                                  )
+                                  .setTimestamp()
+                          ]
+                      }).catch(console.error);
+                  }
+              });
+          });
       }
 
-      // --- Modais de Configuração da Embed ---
-      if (customId.startsWith('embed_edit_modal_')) {
-        const element = customId.replace('embed_edit_modal_', ''); 
-        const value = interaction.fields.getTextInputValue('element_value_input');
-
-        if (element === 'color' && value && !/^#[0-9A-F]{6}$/i.test(value)) {
-// ... (código existente) ...
-            await interaction.reply({ content: 'Cor inválida. Use o formato Hex (Ex: #5865F2)', ephemeral: true });
-            return;
-        }
-
-        // CORREÇÃO: Adicionado async/await
-        await dbWrapper.setEmbedConfigField(interaction.guildId, element, value || null);
-        const config = await dbWrapper.getEmbedConfig(interaction.guildId);
-        const newEmbed = await buildPreviewEmbed(config);
-        
-        await interaction.update({ embeds: [newEmbed] });
-      }
-      
       // --- Modal: Perguntando Canal para Enviar ---
       if (customId === 'send_embed_channel_modal') {
-          await interaction.deferReply({ ephemeral: true });
+          // CORRIGIDO: 'ephemeral: true' mudou para 'flags: 64'
+          await interaction.deferReply({ flags: 64 }); 
 
           const channelId = interaction.fields.getTextInputValue('channel_id_input');
-// ... (código existente) ...
-          const channel = await interaction.guild.channels.fetch(channelId).catch(() => null);
-          
+          const channel = await interaction.client.channels.fetch(channelId).catch(() => null);
+
           if (!channel || channel.type !== ChannelType.GuildText) {
-// ... (código existente) ...
-              return interaction.editReply('Canal de texto não encontrado ou inválido.');
+              return interaction.editReply('O ID do canal é inválido ou não é um canal de texto.');
           }
 
-          // CORREÇÃO: Adicionado async/await
-          const config = await dbWrapper.getEmbedConfig(interaction.guildId);
+          // Pega a embed salva
+          const embedData = await dbWrapper.getEmbedConfig();
+          if (!embedData) {
+              return interaction.editReply('Nenhuma configuração de embed encontrada. (Isso é um erro interno).');
+          }
+
           const embed = new EmbedBuilder()
-            .setTitle(config?.title || 'Verifique-se')
-// ... (código existente) ...
-            .setDescription(config?.description || 'Clique no botão abaixo para se verificar e ter acesso ao servidor.')
-            .setColor(config?.color || '#5865F2');
-          
-          try {
-// ... (código existente) ...
-            if (config?.image_url) embed.setImage(config.image_url);
-            if (config?.thumbnail_url) embed.setThumbnail(config.thumbnail_url);
-          } catch(e) {/* Ignora */}
+              .setTitle(embedData.title)
+              .setDescription(embedData.description)
+              .setColor(embedData.color);
 
-          const buttonText = config?.button_text || 'Verificar';
-
-// ... (código existente) ...
-          const oauthUrl = `https://discord.com/api/oauth2/authorize?client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code&scope=${encodeURIComponent(scopes.join(' '))}`;
-          
-          const button = new ButtonBuilder()
-            .setLabel(buttonText)
-// ... (código existente) ...
-            .setURL(oauthUrl)
-            .setStyle(ButtonStyle.Link)
-            .setEmoji('✅');
-// ... (código existente) ...
-          const row = new ActionRowBuilder().addComponents(button);
+          const row = new ActionRowBuilder()
+              .addComponents(
+                  new ButtonBuilder()
+                      .setCustomId('auth_verify_button') // Botão de verificação real
+                      .setLabel(embedData.buttonLabel)
+                      .setStyle(ButtonStyle.Success)
+                      .setEmoji('✅')
+              );
 
           try {
-            await channel.send({ embeds: [embed], components: [row] });
-// ... (código existente) ...
-            await interaction.editReply(`Mensagem de autenticação enviada para ${channel}!`);
-          } catch (e) {
-            console.error(e);
-            await interaction.editReply('Erro ao enviar mensagem. Verifique se eu tenho permissão para falar nesse canal.');
+              await channel.send({ embeds: [embed], components: [row] });
+              await interaction.editReply(`Mensagem enviada com sucesso para o canal ${channel.name}!`);
+          } catch (error) {
+              console.error(error);
+              await interaction.editReply('Falha ao enviar mensagem. Verifique se eu tenho permissão de "Enviar Mensagens" e "Ver Canal" neste canal.');
           }
       }
+      return;
     }
 
-    // 4. String Select Menu (Dropdown do editor de Embed)
-    if (interaction.isStringSelectMenu()) {
-      const customId = interaction.customId;
+    // 4. Interação com Botão de Verificação (Auth)
+    if (interaction.isButton() && interaction.customId === 'auth_verify_button') {
+        const state = uuidv4(); // Gera um ID único para esta tentativa de auth
+        // Salva o ID do usuário e do servidor no state (para usar no callback)
+        await dbWrapper.saveAuthState(state, interaction.user.id, interaction.guild.id);
 
-      if (customId === 'embed_element_select') {
-        const elementToEdit = interaction.values[0]; 
-        // CORREÇÃO: Adicionado async/await
-        const config = await dbWrapper.getEmbedConfig(interaction.guildId) || {};
+        const authUrl = `https://discord.com/api/oauth2/authorize?client_id=${config.CLIENT_ID}&redirect_uri=${encodeURIComponent(config.REDIRECT_URI)}&response_type=code&scope=identify%20guilds.join&state=${state}`;
+
+        const row = new ActionRowBuilder()
+            .addComponents(
+                new ButtonBuilder()
+                    .setLabel('Autorizar Conexão')
+                    .setStyle(ButtonStyle.Link)
+                    .setURL(authUrl)
+            );
         
-        const modal = new ModalBuilder()
-          .setCustomId(`embed_edit_modal_${elementToEdit}`)
-// ... (código existente) ...
-          .setTitle(`Editar: ${elementToEdit.charAt(0).toUpperCase() + elementToEdit.slice(1)}`);
-          
-        const input = new TextInputBuilder()
-          .setCustomId('element_value_input')
-// ... (código existente) ...
-          .setLabel('Novo valor (deixe vazio para remover)')
-          .setStyle(elementToEdit === 'description' ? TextInputStyle.Paragraph : TextInputStyle.Short)
-          .setValue(config[elementToEdit] || '')
-// ... (código existente) ...
-          .setPlaceholder(elementToEdit === 'color' ? '#5865F2' : '...')
-          .setRequired(false);
-          
-        modal.addComponents(new ActionRowBuilder().addComponents(input));
-// ... (código existente) ...
-        await interaction.showModal(modal);
-      }
+        // CORRIGIDO: 'ephemeral: true' mudou para 'flags: 64'
+        await interaction.reply({
+            content: 'Clique no botão abaixo para autorizar a conexão com sua conta do Discord.',
+            components: [row],
+            flags: 64
+        });
     }
+
   },
 };

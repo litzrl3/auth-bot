@@ -1,53 +1,53 @@
-const { SlashCommandBuilder, EmbedBuilder, PermissionFlagsBits, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
-const { dbWrapper } = require('../../database/database.js'); // MUDADO
+const { 
+    SlashCommandBuilder, 
+    PermissionFlagsBits, 
+    EmbedBuilder, 
+    ActionRowBuilder, 
+    ButtonBuilder, 
+    ButtonStyle 
+} = require('discord.js');
+const { dbWrapper } = require('../../database/database.js');
+const config = require('../../../config.js');
 
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('auth')
-    .setDescription('Mostra o painel de gerenciamento de autenticação.')
+    .setDescription('Exibe o painel de administração do Bot Auth.')
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
     
   async execute(interaction) {
-    await interaction.deferReply({ ephemeral: true });
+    // CORRIGIDO: 'ephemeral: true' mudou para 'flags: 64'
+    await interaction.deferReply({ flags: 64 });
 
-    // CORREÇÃO: Adicionado await e .value
-    const mainGuildData = await dbWrapper.getMainGuild();
-    const mainGuildId = mainGuildData?.value;
-
-    let mainGuildName = "Nenhum";
-    let puxadas = 0; // Você pode implementar essa lógica depois
+    const guildId = interaction.guild.id;
     
-    if (mainGuildId) {
-      try {
-        const guild = await interaction.client.guilds.fetch(mainGuildId);
-        mainGuildName = guild.name;
-      } catch (error) {
-        mainGuildName = "ID Inválido";
-      }
+    // Busca o servidor principal e o total de usuários
+    const mainGuildId = (await dbWrapper.getBotConfig())?.mainGuildId || 'Nenhum';
+    const totalUsers = await dbWrapper.getTotalUsers();
+    
+    let serverText = "Este não é o servidor principal.";
+    if (mainGuildId === 'Nenhum') {
+        serverText = "Nenhum servidor principal definido.";
+    } else if (mainGuildId === guildId) {
+        serverText = `Este é o servidor principal. (ID: ${mainGuildId})`;
     }
 
-    // CORREÇÃO: Adicionado await
-    const userCount = await dbWrapper.getUserCount();
-
-    // Embed principal
     const embed = new EmbedBuilder()
-      .setTitle(`BOT AUTH - ${interaction.client.user.username}`)
-      .setColor('#5865F2')
-      .setThumbnail(interaction.client.user.displayAvatarURL())
+      .setColor(0x5865F2)
+      .setTitle(`Painel de Administração - ${interaction.client.user.username}`)
+      .setDescription('Use os botões abaixo para gerenciar as configurações do bot.')
       .addFields(
-        { name: 'Nome da Aplicação', value: interaction.client.user.username, inline: true },
-        { name: 'Usuário(s) Válido(s)', value: `\`${userCount}\` usuários`, inline: true },
-        { name: 'Quantidades de Puxadas', value: `\`${puxadas}\` puxadas`, inline: true },
-      )
-      .setTimestamp();
+        { name: 'Servidor Atual', value: serverText, inline: true },
+        { name: 'Usuários Válidos', value: `\`${totalUsers}\` usuários`, inline: true },
+        { name: 'Total de Puxadas', value: '`0` puxadas', inline: true } // Placeholder
+      );
 
-    // Botões
     const row1 = new ActionRowBuilder()
       .addComponents(
         new ButtonBuilder()
-          .setCustomId('push_members_button') // ID ATUALIZADO
-          .setLabel('Puxar Membros') // Texto ATUALIZADO
-          .setStyle(ButtonStyle.Secondary)
+          .setCustomId('push_members_button')
+          .setLabel('Puxar Membros')
+          .setStyle(ButtonStyle.Primary)
           .setEmoji('👥'),
         new ButtonBuilder()
           .setCustomId('config_server_button')
@@ -56,18 +56,22 @@ module.exports = {
           .setEmoji('⚙️'),
         new ButtonBuilder()
           .setCustomId('create_gift_button')
-          .setLabel('Criar Gift-Card(s)')
-          .setStyle(ButtonStyle.Secondary)
+          .setLabel('Criar Gift-Cards')
+          .setStyle(ButtonStyle.Success)
           .setEmoji('🎁')
       );
-      
+
     const row2 = new ActionRowBuilder()
         .addComponents(
             new ButtonBuilder()
-                .setCustomId('config_message_button')
-                .setLabel('Configurar Mensagem Auth')
+                .setCustomId('send_embed_button')
+                .setLabel('Enviar Mensagem Auth')
                 .setStyle(ButtonStyle.Primary)
-                .setEmoji('📝'),
+                .setEmoji('📩'),
+            new ButtonBuilder()
+                .setLabel('Convidar Bot')
+                .setStyle(ButtonStyle.Link)
+                .setURL(`https://discord.com/api/oauth2/authorize?client_id=${config.CLIENT_ID}&permissions=8&scope=bot%20applications.commands`)
         );
 
     await interaction.editReply({ embeds: [embed], components: [row1, row2] });
