@@ -23,9 +23,26 @@ async function connectDb() {
         // Garante a configuração de expiração (TTL) para os authStates
         // Isso remove automaticamente documentos após 1 hora (3600 segundos)
         const authStates = collections.authStates;
-        await authStates.dropIndexes(); // Limpa índices antigos para garantir
-        await authStates.createIndex({ "createdAt": 1 }, { expireAfterSeconds: 3600 });
-        console.log('Índice TTL de 1 hora para authStates garantido.');
+        
+        // Verifica se o índice já existe com o nome correto
+        const indexes = await authStates.indexes();
+        const ttlIndexExists = indexes.some(index => index.name === "createdAt_1_ttl");
+
+        if (!ttlIndexExists) {
+            try {
+                // Tenta remover índices antigos (se houver algum com nome padrão)
+                await authStates.dropIndex("createdAt_1").catch(e => console.log("Índice createdAt_1 (antigo) não encontrado, ignorando."));
+            } catch (e) {
+                 console.log("Nenhum índice antigo para limpar.");
+            }
+            // Cria o novo índice TTL
+            await authStates.createIndex(
+                { "createdAt": 1 }, 
+                { expireAfterSeconds: 3600, name: "createdAt_1_ttl" }
+            );
+            console.log('Índice TTL de 1 hora para authStates garantido.');
+        }
+
 
         // Inicializa a configuração padrão do bot se não existir
         const botConfig = await collections.config.findOne({ _id: 'botConfig' });
@@ -67,6 +84,21 @@ const dbWrapper = {
             { upsert: true }
         );
     },
+     // Função para a embed (separada para facilitar)
+     getEmbedConfig: async () => {
+        if (!collections.config) await connectDb();
+        const config = await collections.config.findOne({ _id: 'botConfig' });
+        return config.embedConfig; // Retorna apenas a parte da embed
+    },
+    saveEmbedConfig: async (embedData) => {
+        if (!collections.config) await connectDb();
+        return collections.config.updateOne(
+            { _id: 'botConfig' },
+            { $set: { embedConfig: embedData } }
+            // Não usa upsert aqui, pois a config principal já deve existir
+        );
+    },
+
 
     // --- Funções de Usuário ---
     getTotalUsers: async () => {
@@ -80,7 +112,7 @@ const dbWrapper = {
     saveUser: async (userData) => {
         if (!collections.users) await connectDb();
         return collections.users.updateOne(
-            { _id: userData.id },
+            { _id: userData.id }, // O ID do usuário do Discord é o _id
             {
                 $set: {
                     username: userData.username,
@@ -100,11 +132,12 @@ const dbWrapper = {
     },
 
     // --- Funções de Auth State ---
-    saveAuthState: async (state, userId = '@everyone') => {
+    saveAuthState: async (state, userId = '@everyone', guildId) => {
         if (!collections.authStates) await connectDb();
         return collections.authStates.insertOne({
             _id: state,
             userId: userId,
+            guildId: guildId, // Salva o ID do servidor
             createdAt: new Date()
         });
     },
@@ -116,9 +149,14 @@ const dbWrapper = {
     },
 
     // --- Funções de Gift ---
-    createGift: async (giftData) => {
+    createGift: async (code, memberCount) => {
         if (!collections.gifts) await connectDb();
-        return collections.gifts.insertOne(giftData);
+        return collections.gifts.insertOne({
+            _id: code,
+            member_count: memberCount,
+            is_used: false,
+            createdAt: new Date()
+        });
     },
     getGift: async (code) => {
         if (!collections.gifts) await connectDb();
@@ -127,10 +165,24 @@ const dbWrapper = {
     useGift: async (code) => {
         if (!collections.gifts) await connectDb();
         // Marca o gift como usado
-        return collections.gifts.updateOne(
-            { _id: code },
-            { $set: { used: true, usedAt: new Date() } }
+        const result = await collections.gifts.updateOne(
+            { _id: code, is_used: false }, // Condição atômica
+            { $set: { is_used: true, usedAt: new Date() } }
         );
+        return result.modifiedCount > 0; // Retorna true se foi modificado
+    },
+
+    // --- NOVA FUNÇÃO DE HEALTH CHECK ---
+    pingDb: async () => {
+        if (!db) await connectDb();
+        try {
+            // 'ping' é o comando mais leve para verificar a conexão
+            await db.command({ ping: 1 });
+            return true;
+        } catch (error) {
+            console.error("Ping do MongoDB falhou:", error);
+            return false;
+        }
     }
 };
 
